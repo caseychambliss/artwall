@@ -1,0 +1,26 @@
+# artwall.timer
+# systemd user timer that triggers artwall.service on a schedule.
+#
+# Default schedule: 30 seconds after boot, then once every 24 hours.
+# The interval is set by install.sh from the interval_hours value in config.ini.
+# To change the interval after installation, edit OnUnitActiveSec below and run:
+#   systemctl --user daemon-reload
+
+[Unit]
+Description=artwall -- Wallpaper rotation timer
+
+[Timer]
+# Run 30 seconds after the user session starts (allows network to come up)
+OnBootSec=30s
+
+# Then repeat on this interval. Replaced by install.sh with the configured value.
+OnUnitActiveSec=ARTWALL_INTERVAL
+
+# Keep the service active even if the timer fires while the system is asleep;
+# the wallpaper will update the next time the session is active.
+Persistent=true
+
+Unit=artwall.service
+
+[Install]
+WantedBy=timers.target

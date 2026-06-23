@@ -1,0 +1,28 @@
+# artwall.service
+# systemd user service that runs artwall.py once per invocation.
+# Paired with artwall.timer for scheduled rotation.
+#
+# Installation (handled automatically by install.sh):
+#   mkdir -p ~/.config/systemd/user
+#   cp artwall.service ~/.config/systemd/user/
+#   systemctl --user daemon-reload
+#   systemctl --user enable artwall.timer
+#   systemctl --user start artwall.timer
+
+[Unit]
+Description=artwall -- Fetch and set museum art wallpaper
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+
+# Replaced by install.sh with the actual install path
+ExecStart=ARTWALL_EXEC_PATH
+
+# Pass the user's display and DBUS session so gsettings can reach the compositor
+Environment=DISPLAY=:0
+Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/%U/bus
+
+[Install]
+WantedBy=default.target

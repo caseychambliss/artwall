@@ -1,0 +1,143 @@
+# artwall configuration file
+# ============================================================
+# Copy this file to ~/.config/artwall/config.ini and edit it.
+# Lines beginning with # are comments and are ignored.
+# Do not place comments on the same line as a value.
+
+
+[general]
+
+# How often to rotate the wallpaper (hours).
+# This value is written into the systemd timer by install.sh.
+# To change the interval after installation, edit the timer directly:
+#   ~/.config/systemd/user/artwall.timer
+interval_hours = 24
+
+# Directory where downloaded raw images are cached.
+cache_dir = ~/.cache/artwall
+
+# How many raw images to keep in the cache before the oldest are removed.
+# The composited current.jpg is not counted against this limit.
+cache_max = 100
+
+# Final composited wallpaper path. Your desktop environment reads from here.
+# Must be a writable absolute path; the directory is created if it does not exist.
+output_path = ~/.cache/artwall/current.jpg
+
+
+[sources]
+
+# ── Metropolitan Museum of Art ────────────────────────────────────────────────
+# No API key required.
+# Collection: 375,000+ objects, heavy on European paintings and decorative arts.
+# API: https://metmuseum.github.io/
+
+met_museum = true
+
+# ── Art Institute of Chicago ──────────────────────────────────────────────────
+# No API key required.
+# Collection: 80,000+ objects, strong on Impressionism and American art.
+# API: https://api.artic.edu/docs/
+
+art_institute_chicago = true
+
+# ── Rijksmuseum Amsterdam ─────────────────────────────────────────────────────
+# Free API key required. Register at:
+#   https://www.rijksmuseum.nl/en/research/conduct-research/data/
+#   access-to-and-use-of-the-rijksmuseum-api
+# Collection: 700,000+ objects, unparalleled Dutch Golden Age holdings.
+# API: https://data.rijksmuseum.nl/object-metadata/api/
+
+rijksmuseum = false
+rijksmuseum_api_key = YOUR_KEY_HERE
+
+# ── Source selection weights ──────────────────────────────────────────────────
+# When multiple sources are enabled, artwall selects one at random.
+# Weights control relative probability: weight=2 means twice as likely as weight=1.
+# Set a source's weight to 0 to effectively disable it without setting enabled=false.
+
+met_weight = 1
+aic_weight = 1
+rijksmuseum_weight = 1
+
+
+[filters]
+
+# All filter fields accept comma-separated lists.
+# Leave a field empty to apply no filter on that dimension.
+# Filters that cannot be expressed as API parameters are applied client-side.
+
+# ── Categories ────────────────────────────────────────────────────────────────
+# Filter by object type.
+# Recognised values (not all are available at every source):
+#   paintings   drawings   prints   sculpture   photographs   textiles
+# Example: categories = paintings, drawings
+
+categories = paintings
+
+# ── Regions / Cultures ────────────────────────────────────────────────────────
+# Filter by region or cultural origin.
+# These are used as keyword search terms or matched against place_of_origin fields.
+# Examples: Dutch, Flemish, Italian, French, Spanish, German, Japanese, Chinese,
+#           British, American, Venetian, Roman, Persian, Mughal
+# Multiple values are accepted; results matching any of the terms are included.
+# Example: regions = Dutch, Flemish
+
+regions =
+
+# ── Themes / Subjects ─────────────────────────────────────────────────────────
+# Filter by subject matter or iconographic theme.
+# These are used as keyword search terms.
+# Examples: portrait, landscape, still life, mythology, religious, biblical,
+#           genre, history, allegory, nude, battle, marine, cityscape, flower
+# Example: themes = portrait, landscape
+
+themes =
+
+# ── Media / Materials ─────────────────────────────────────────────────────────
+# Filter by medium or material.
+# These are used as keyword search terms or matched against material fields.
+# For Rijksmuseum, the first media value is passed as the structured material param.
+# Examples: oil on canvas, oil on panel, watercolor, tempera, fresco,
+#           engraving, etching, lithograph, gouache, pastel
+# Example: media = oil on canvas
+
+media =
+
+# ── Date Range ────────────────────────────────────────────────────────────────
+# Only include works dated within this range.
+# Use negative values for BCE dates (e.g. date_min = -500 for 500 BCE).
+# Leave either value empty (or remove the key) to leave that bound open.
+# Note: Met and AIC apply date filtering client-side; Rijksmuseum applies it
+# server-side via yearfrom/yearto parameters.
+
+date_min = 1400
+date_max = 1900
+
+
+[overlay]
+
+# Show a metadata card on the wallpaper image.
+enabled = true
+
+# Position of the card on the image.
+# Options: bottom-left  bottom-center  bottom-right
+#          top-left     top-center     top-right
+position = bottom-left
+
+# Title text size in points.
+# Detail lines (artist, year, medium) are rendered at 80% of this size.
+# Actual rendered size depends on the font and screen DPI.
+font_size = 28
+
+# Background card opacity (0.0 = fully transparent, 1.0 = fully opaque).
+background_opacity = 0.65
+
+# Padding between the card edge and the text, in pixels.
+padding = 20
+
+# Text colour as R, G, B values (0-255 each).
+text_color = 255, 255, 255
+
+# Show the museum name as the last line of the card.
+show_source = true
