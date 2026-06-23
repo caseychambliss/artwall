@@ -100,7 +100,9 @@ else
     echo
     warn "NEXT STEP: edit ${CONFIG_FILE} before the first run."
     warn "At minimum, review the [filters] section and enable/disable sources."
-    warn "If you want Rijksmuseum, add your API key under [sources]."
+    warn "If you want Rijksmuseum, register for a free API key at:"
+    warn "  https://www.rijksmuseum.nl/en/research/conduct-research/data/access-to-and-use-of-the-rijksmuseum-api"
+    warn "Then add your key under [sources] in config.ini."
     echo
 fi
 

@@ -36,6 +36,10 @@ License  MIT
 
 VERSION = "1.0.0"
 
+# Identify artwall to museum APIs and CDNs. Some providers (AIC) return 403
+# for requests with the default Python user-agent.
+USER_AGENT = "artwall/1.0.0 (https://github.com/caseychambliss/artwall)"
+
 import argparse
 import configparser
 import json
@@ -277,7 +281,8 @@ class MetSource:
         dbg(f"Met search params: {params}", verbose)
 
         try:
-            r = requests.get(f"{self.BASE}/search", params=params, timeout=10)
+            r = requests.get(f"{self.BASE}/search", params=params, timeout=10,
+                            headers={"User-Agent": USER_AGENT})
             r.raise_for_status()
             data = r.json()
         except Exception as exc:
@@ -305,7 +310,8 @@ class MetSource:
     ) -> Optional[Artwork]:
         import requests
         try:
-            r = requests.get(f"{self.BASE}/objects/{object_id}", timeout=10)
+            r = requests.get(f"{self.BASE}/objects/{object_id}", timeout=10,
+                            headers={"User-Agent": USER_AGENT})
             r.raise_for_status()
             obj = r.json()
         except Exception as exc:
@@ -401,7 +407,8 @@ class AICSource:
         dbg(f"AIC params: {params}", verbose)
 
         try:
-            r = requests.get(f"{self.BASE}/artworks", params=params, timeout=10)
+            r = requests.get(f"{self.BASE}/artworks", params=params, timeout=10,
+                            headers={"User-Agent": USER_AGENT})
             r.raise_for_status()
             data = r.json()
         except Exception as exc:
@@ -442,7 +449,7 @@ class AICSource:
 
         return Artwork(
             title       = item.get("title", "Untitled"),
-            artist      = item.get("artist_display", ""),
+            artist      = (item.get("artist_display", "") or "").split("\n")[0].strip(),
             year        = item.get("date_display", ""),
             medium      = item.get("medium_display", ""),
             culture     = item.get("place_of_origin", ""),
@@ -518,7 +525,8 @@ class RijksmuseumSource:
         dbg(f"Rijksmuseum params: {params}", verbose)
 
         try:
-            r = requests.get(self.BASE, params=params, timeout=10)
+            r = requests.get(self.BASE, params=params, timeout=10,
+                            headers={"User-Agent": USER_AGENT})
             r.raise_for_status()
             data = r.json()
         except Exception as exc:
@@ -578,7 +586,8 @@ def download_image(url: str, dest: Path, verbose: bool = False) -> bool:
     import requests
     try:
         dbg(f"Downloading: {url}", verbose)
-        r = requests.get(url, stream=True, timeout=30)
+        r = requests.get(url, stream=True, timeout=30,
+                         headers={"User-Agent": USER_AGENT})
         r.raise_for_status()
         with open(dest, "wb") as fh:
             for chunk in r.iter_content(chunk_size=8192):
@@ -996,34 +1005,43 @@ def main():
 
     ok(f"Config loaded from {config_path}")
 
-    # ── Step 2: fetch artwork from museum API
+    # ── Steps 2 and 3: fetch artwork and download image
+    # Retries up to MAX_FETCH_ATTEMPTS times if a download fails (e.g. CDN 403).
+    MAX_FETCH_ATTEMPTS = 3
+    source   = select_source(cfg, args.source, args.verbose)
+    artwork  = None
+    raw_path = None
+
     step(2, TOTAL_STEPS, "Fetching artwork from museum API")
-    source  = select_source(cfg, args.source, args.verbose)
-    artwork = source.fetch_random(filters, verbose=args.verbose)
+    for attempt in range(1, MAX_FETCH_ATTEMPTS + 1):
+        if attempt > 1:
+            warn(f"Retrying with a different artwork (attempt {attempt}/{MAX_FETCH_ATTEMPTS})")
 
-    if artwork is None:
-        err("Could not fetch artwork -- adjust your filters or check network")
+        artwork = source.fetch_random(filters, verbose=args.verbose)
+        if artwork is None:
+            err("Could not fetch artwork -- adjust your filters or check network")
+            sys.exit(1)
+
+        ok(
+            f"Found: {artwork.title!r}"
+            f"{(' by ' + artwork.artist) if artwork.artist else ''}"
+            f"{(' (' + artwork.year + ')') if artwork.year else ''}"
+        )
+        dbg(f"Image URL: {artwork.image_url}", args.verbose)
+
+        step(3, TOTAL_STEPS, "Downloading image")
+        timestamp = int(time.time())
+        raw_path  = cache_dir / f"raw_{timestamp}.jpg"
+
+        if download_image(artwork.image_url, raw_path, verbose=args.verbose):
+            size_kb = raw_path.stat().st_size // 1024
+            ok(f"Downloaded {size_kb} KB")
+            break
+
+        raw_path.unlink(missing_ok=True)
+    else:
+        err("Image download failed after multiple attempts -- check network or broaden filters")
         sys.exit(1)
-
-    ok(
-        f"Found: {artwork.title!r}"
-        f"{(' by ' + artwork.artist) if artwork.artist else ''}"
-        f"{(' (' + artwork.year + ')') if artwork.year else ''}"
-    )
-    dbg(f"Image URL: {artwork.image_url}", args.verbose)
-
-    # ── Step 3: download image (Rule 19: timestamped filename avoids
-    #   overwriting a cached file we might want to keep)
-    step(3, TOTAL_STEPS, "Downloading image")
-    timestamp = int(time.time())
-    raw_path  = cache_dir / f"raw_{timestamp}.jpg"
-
-    if not download_image(artwork.image_url, raw_path, verbose=args.verbose):
-        err("Image download failed")
-        sys.exit(1)
-
-    size_kb = raw_path.stat().st_size // 1024
-    ok(f"Downloaded {size_kb} KB")
 
     # ── Step 4: composite metadata overlay
     step(4, TOTAL_STEPS, "Compositing metadata overlay")
