@@ -168,3 +168,10 @@ scaling = scaled
 #
 # TODO (v2 GUI): this will become a toggle in the settings interface.
 show_facts = false
+
+# Show only title and artist (2 lines) instead of all metadata.
+# Recommended for large canvases or when the full card feels too prominent.
+# When compact is true, show_facts and show_source have no effect.
+#
+# TODO (v2 GUI): will become a toggle in the settings interface.
+compact = false

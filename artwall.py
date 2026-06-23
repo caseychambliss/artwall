@@ -140,7 +140,8 @@ class Artwork:
         return [text for text, _ in self.label_data(show_source=show_source, show_facts=show_facts)]
 
     def label_data(
-        self, show_source: bool = True, show_facts: bool = False
+        self, show_source: bool = True, show_facts: bool = False,
+        compact: bool = False
     ) -> list[tuple[str, str]]:
         """
         Return ordered (text, role) pairs for the overlay card.
@@ -155,13 +156,18 @@ class Artwork:
         Line order:
           1. Title (always present; falls back to "Untitled")
           2. Artist (omitted if unknown)
-          3. Year  |  Medium  (omitted if both unknown; medium truncated at 80 chars)
-          4. Source name (optional, controlled by show_source)
-          5. Fact text (optional, controlled by show_facts; wrapped by compositor)
+          3. Year  |  Medium  (omitted if both unknown; omitted in compact mode)
+          4. Source name (optional; omitted in compact mode)
+          5. Fact text (optional; omitted in compact mode)
+
+        compact=True: shows only title and artist (2 lines). Use this for
+        a minimal overlay that does not distract from the artwork.
         """
         data: list[tuple[str, str]] = [(self.title or "Untitled", "title")]
         if self.artist:
             data.append((self.artist, "artist"))
+        if compact:
+            return data
         medium_short = (self.medium[:80] + "…") if len(self.medium) > 80 else self.medium
         detail = "  |  ".join(p for p in (self.year, medium_short) if p)
         if detail:
@@ -817,6 +823,33 @@ def get_screen_resolution() -> Optional[tuple]:
     return None
 
 
+def get_work_area() -> Optional[tuple]:
+    """
+    Return the usable desktop work area as (x, y, width, height) in screen
+    pixels by reading the _NET_WORKAREA X11 root property via xprop.
+
+    _NET_WORKAREA is set by all major Linux desktop environments (Cinnamon,
+    GNOME, XFCE, KDE, MATE) and reflects the screen area available after
+    subtracting panels and taskbars. Comparing this to the total screen size
+    reveals panel sizes on each edge without any DE-specific assumptions.
+
+    Returns None if xprop is unavailable or the property is not set
+    (e.g. on Wayland without XWayland, or in headless environments).
+    """
+    try:
+        r = subprocess.run(
+            ["xprop", "-root", "_NET_WORKAREA"],
+            capture_output=True, text=True, timeout=5
+        )
+        # Output format: '_NET_WORKAREA(CARDINAL) = 0, 0, 1400, 860'
+        m = re.search(r"=\s*(\d+),\s*(\d+),\s*(\d+),\s*(\d+)", r.stdout)
+        if m:
+            return tuple(int(v) for v in m.groups())  # x, y, width, height
+    except Exception:
+        pass
+    return None
+
+
 def calculate_display_scale(
     img_w: int, img_h: int,
     screen_w: int, screen_h: int,
@@ -859,6 +892,7 @@ def composite_overlay(
     text_color:  tuple,
     show_source: bool,
     show_facts:  bool = False,
+    compact:     bool = False,
     scaling:     str  = "scaled",
     verbose:     bool = False,
 ) -> bool:
@@ -885,7 +919,9 @@ def composite_overlay(
         err(f"Cannot open image for compositing: {exc}")
         return False
 
-    label_pairs = artwork.label_data(show_source=show_source, show_facts=show_facts)
+    label_pairs = artwork.label_data(
+        show_source=show_source, show_facts=show_facts, compact=compact
+    )
     if not label_pairs:
         shutil.copy(image_path, output_path)
         return True
@@ -898,6 +934,7 @@ def composite_overlay(
     # font_size = apparent size wanted on screen. We divide by the display
     # scale factor so the compositor writes pixels that appear at font_size
     # after Cinnamon/GNOME scales the image to fill the screen.
+    display_scale = 1.0   # default: assume 1:1 if screen detection fails
     screen_res = get_screen_resolution()
     if screen_res:
         screen_w, screen_h = screen_res
@@ -917,6 +954,17 @@ def composite_overlay(
         font_size_in_image = max(font_size, int(min(img_w, img_h) * 0.12))
         dbg(f"Screen resolution unavailable -- using {font_size_in_image}pt in image",
             verbose)
+
+    # Cap in-image font at 4% of the short dimension so the card stays
+    # proportional to the painting regardless of how the screen scaling math
+    # comes out for very high-resolution images. This is the font size ceiling;
+    # the screen-resolution calculation provides the floor via the desired
+    # on-screen target but cannot be allowed to dominate a large canvas.
+    font_cap = max(16, int(min(img_w, img_h) * 0.04))
+    if font_size_in_image > font_cap:
+        dbg(f"Font capped: {font_size_in_image}pt -> {font_cap}pt "
+            f"(4% of short dim {min(img_w, img_h)}px)", verbose)
+        font_size_in_image = font_cap
 
     font_set    = load_font_set(font_size_in_image)
     dummy_draw  = ImageDraw.Draw(img)
@@ -941,18 +989,48 @@ def composite_overlay(
     card_w = text_w + padding * 2
     card_h = text_h + padding * 2
 
-    # Resolve position
+    # Resolve position, accounting for desktop panels via _NET_WORKAREA.
+    # Each edge margin = base margin + panel depth on that edge (in image px).
     pos_key = position.lower() if position.lower() in OVERLAY_POSITIONS else "bottom-left"
     halign, valign = OVERLAY_POSITIONS[pos_key]
     img_w, img_h = img.size
-    margin = padding * 2
+    base_margin = padding * 2
+
+    # Detect panels by comparing _NET_WORKAREA to total screen dimensions.
+    # Falls back cleanly (zero panel depth) if work area is unavailable.
+    panel_top = panel_bottom = panel_left = panel_right = 0
+    work_area = get_work_area()
+    if work_area and screen_res:
+        wa_x, wa_y, wa_w, wa_h = work_area
+        screen_w_px, screen_h_px = screen_res
+        panel_top    = wa_y
+        panel_left   = wa_x
+        panel_bottom = screen_h_px - (wa_y + wa_h)
+        panel_right  = screen_w_px - (wa_x + wa_w)
+        dbg(
+            f"Work area {wa_w}x{wa_h} at ({wa_x},{wa_y}) -- "
+            f"panels: top={panel_top} bottom={panel_bottom} "
+            f"left={panel_left} right={panel_right}px",
+            verbose,
+        )
+
+    def panel_to_image(panel_px: int) -> int:
+        """Convert a panel size in screen pixels to image pixels."""
+        if display_scale and display_scale > 0:
+            return int(panel_px / display_scale)
+        return panel_px
+
+    margin_top    = base_margin + panel_to_image(panel_top)
+    margin_bottom = base_margin + panel_to_image(panel_bottom)
+    margin_left   = base_margin + panel_to_image(panel_left)
+    margin_right  = base_margin + panel_to_image(panel_right)
 
     card_x = (
-        margin if halign == "left"
-        else img_w - card_w - margin if halign == "right"
+        margin_left if halign == "left"
+        else img_w - card_w - margin_right if halign == "right"
         else (img_w - card_w) // 2
     )
-    card_y = margin if valign == "top" else img_h - card_h - margin
+    card_y = margin_top if valign == "top" else img_h - card_h - margin_bottom
 
     # Draw the card on a transparent overlay layer
     overlay = Image.new("RGBA", img.size, (0, 0, 0, 0))
@@ -1269,6 +1347,7 @@ def configure(config_path: Path):
             f"  Scaling                    {get('overlay', 'scaling', 'scaled')}",
             f"  Show museum name           {bool_label('overlay', 'show_source', 'true')}",
             f"  Show artwork facts          {bool_label('overlay', 'show_facts', 'false')}",
+            f"  Compact (title + artist only) {bool_label('overlay', 'compact', 'false')}",
             questionary.Separator(""),
             "  Done",
         ]
@@ -1487,6 +1566,15 @@ def configure(config_path: Path):
             if v is not None:
                 save("overlay", "show_facts", str(v).lower(), "show_facts")
 
+        elif a.startswith("Compact"):
+            v = questionary.confirm(
+                "Show only title and artist (2 lines) instead of all metadata?\n"
+                "  Recommended for large canvases where the full card feels too prominent.",
+                default=get("overlay", "compact", "false") == "true",
+            ).ask()
+            if v is not None:
+                save("overlay", "compact", str(v).lower(), "compact")
+
         print()
 
 
@@ -1694,6 +1782,7 @@ def main():
     padding         = cfg.getint   ("overlay", "padding",             fallback=20)
     show_source     = cfg.getboolean("overlay", "show_source",  fallback=True)
     show_facts      = cfg.getboolean("overlay", "show_facts",   fallback=False)
+    compact         = cfg.getboolean("overlay", "compact",      fallback=False)
     scaling         = cfg.get      ("overlay", "scaling",       fallback="scaled")
     text_color_raw  = cfg.get      ("overlay", "text_color",   fallback="255, 255, 255")
     text_color      = tuple(int(x.strip()) for x in text_color_raw.split(","))
@@ -1710,6 +1799,7 @@ def main():
             text_color  = text_color,
             show_source = show_source,
             show_facts  = show_facts,
+            compact     = compact,
             scaling     = scaling,
             verbose     = args.verbose,
         )
