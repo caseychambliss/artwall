@@ -584,10 +584,15 @@ def download_image(url: str, dest: Path, verbose: bool = False) -> bool:
     Returns True on success, False on any network or HTTP error.
     """
     import requests
+    headers = {"User-Agent": USER_AGENT}
+    # AIC's IIIF image server requires a Referer header from the artic.edu domain
+    # to serve images; without it, some images return 403.
+    if "artic.edu" in url:
+        headers["Referer"] = "https://www.artic.edu/"
     try:
         dbg(f"Downloading: {url}", verbose)
         r = requests.get(url, stream=True, timeout=30,
-                         headers={"User-Agent": USER_AGENT})
+                         headers=headers)
         r.raise_for_status()
         with open(dest, "wb") as fh:
             for chunk in r.iter_content(chunk_size=8192):
@@ -1021,16 +1026,19 @@ def main():
     ok(f"Config loaded from {config_path}")
 
     # ── Steps 2 and 3: fetch artwork and download image
-    # Retries up to MAX_FETCH_ATTEMPTS times if a download fails (e.g. CDN 403).
+    # Re-selects the source on each retry attempt so a persistent download
+    # failure from one museum (e.g. AIC CDN 403) may resolve by switching
+    # to a different source on the next attempt.
     MAX_FETCH_ATTEMPTS = 3
-    source   = select_source(cfg, args.source, args.verbose)
     artwork  = None
     raw_path = None
 
     step(2, TOTAL_STEPS, "Fetching artwork from museum API")
     for attempt in range(1, MAX_FETCH_ATTEMPTS + 1):
         if attempt > 1:
-            warn(f"Retrying with a different artwork (attempt {attempt}/{MAX_FETCH_ATTEMPTS})")
+            warn(f"Retrying with a different source (attempt {attempt}/{MAX_FETCH_ATTEMPTS})")
+
+        source  = select_source(cfg, args.source, args.verbose)
 
         artwork = source.fetch_random(filters, verbose=args.verbose)
         if artwork is None:
