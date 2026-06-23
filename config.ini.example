@@ -141,3 +141,15 @@ text_color = 255, 255, 255
 
 # Show the museum name as the last line of the card.
 show_source = true
+
+# How to fit the image to the screen.
+# Options:
+#   scaled     -- fit the whole image, letterboxed if aspect ratio differs (recommended for art)
+#   zoom       -- crop to fill the screen (may cut off the overlay card in corners)
+#   stretched  -- distort to fill the screen
+#   centered   -- center at native size without scaling
+#   wallpaper  -- tile the image
+# "scaled" is strongly recommended for paintings -- ensures the overlay card is always visible.
+#
+# TODO (v2 GUI): this will become a dropdown in the settings interface.
+scaling = scaled

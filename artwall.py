@@ -755,12 +755,19 @@ def detect_de() -> str:
     return "unknown"
 
 
-def set_wallpaper(image_path: Path, verbose: bool = False) -> bool:
+def set_wallpaper(image_path: Path, scaling: str = "scaled", verbose: bool = False) -> bool:
     """
     Set the desktop wallpaper to image_path.
 
     Supports Cinnamon, GNOME, MATE, XFCE, KDE Plasma, and makes a best-effort
     attempt for unknown environments via gsettings.
+
+    scaling controls how the image fills the screen:
+      scaled     -- fit whole image, letterboxed if needed (recommended for art)
+      zoom       -- crop to fill screen (may cut off overlay card in corners)
+      stretched  -- distort to fill screen
+      centered   -- center at native size, no scaling
+      wallpaper  -- tile
 
     Returns True if the wallpaper was set successfully.
     """
@@ -775,20 +782,28 @@ def set_wallpaper(image_path: Path, verbose: bool = False) -> bool:
         "cinnamon": [
             ["gsettings", "set", "org.cinnamon.desktop.background",
              "picture-uri", uri],
+            ["gsettings", "set", "org.cinnamon.desktop.background",
+             "picture-options", scaling],
         ],
         "gnome": [
             ["gsettings", "set", "org.gnome.desktop.background",
              "picture-uri", uri],
             ["gsettings", "set", "org.gnome.desktop.background",
              "picture-uri-dark", uri],
+            ["gsettings", "set", "org.gnome.desktop.background",
+             "picture-options", scaling],
         ],
         "mate": [
             ["gsettings", "set", "org.mate.background",
              "picture-filename", path_str],
+            ["gsettings", "set", "org.mate.background",
+             "picture-options", scaling],
         ],
         "budgie": [
             ["gsettings", "set", "org.gnome.desktop.background",
              "picture-uri", uri],
+            ["gsettings", "set", "org.gnome.desktop.background",
+             "picture-options", scaling],
         ],
         "xfce": [
             ["xfconf-query", "-c", "xfce4-desktop",
@@ -1098,7 +1113,8 @@ def main():
         warn("Dry-run mode: wallpaper not set")
         print(f"        Image is at: {output_path}")
     else:
-        if set_wallpaper(output_path, verbose=args.verbose):
+        scaling = cfg.get("overlay", "scaling", fallback="scaled")
+        if set_wallpaper(output_path, scaling=scaling, verbose=args.verbose):
             ok("Wallpaper set")
         else:
             warn("Could not set wallpaper automatically")
