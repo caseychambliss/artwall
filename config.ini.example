@@ -128,7 +128,7 @@ position = bottom-left
 # Title text size in points.
 # Detail lines (artist, year, medium) are rendered at 80% of this size.
 # Actual rendered size depends on the font and screen DPI.
-font_size = 28
+font_size = 40
 
 # Background card opacity (0.0 = fully transparent, 1.0 = fully opaque).
 background_opacity = 0.65
@@ -153,3 +153,18 @@ show_source = true
 #
 # TODO (v2 GUI): this will become a dropdown in the settings interface.
 scaling = scaled
+
+# Show a brief fact about the artwork or artist in the overlay card.
+# The fact is drawn from museum API metadata already fetched during wallpaper rotation
+# -- no extra API calls are made.
+#
+# Fact sources by museum:
+#   Metropolitan Museum of Art    period/dynasty + thematic tag terms
+#   Art Institute of Chicago      first sentence of the object description
+#   Rijksmuseum Amsterdam         condensed long title (artist, medium, dimensions)
+#
+# For richer AI-generated facts (artist intent, hidden symbolism), see Task 17
+# in next-session.md -- this requires the Anthropic API or a local LM Studio model.
+#
+# TODO (v2 GUI): this will become a toggle in the settings interface.
+show_facts = false

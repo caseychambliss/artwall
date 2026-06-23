@@ -133,26 +133,44 @@ class Artwork:
     image_url:   str  # direct URL to a high-resolution JPEG or PNG
     source_name: str  # human-readable museum name
     artwork_url: str  # URL to the museum's web page for this work
+    fact:        str = ""  # optional 1-2 sentence fact about the artwork or artist
 
-    def label_lines(self, show_source: bool = True) -> list[str]:
+    def label_lines(self, show_source: bool = True, show_facts: bool = False) -> list[str]:
+        """Flat list of strings for the overlay card. See also label_data()."""
+        return [text for text, _ in self.label_data(show_source=show_source, show_facts=show_facts)]
+
+    def label_data(
+        self, show_source: bool = True, show_facts: bool = False
+    ) -> list[tuple[str, str]]:
         """
-        Return ordered lines of text for the metadata overlay card.
+        Return ordered (text, role) pairs for the overlay card.
+
+        Roles and their rendering:
+          title   -- large bold
+          artist  -- medium regular
+          detail  -- smaller regular  (year | medium)
+          source  -- smaller regular
+          fact    -- smaller italic   (wrapped by compositor to fit card width)
 
         Line order:
           1. Title (always present; falls back to "Untitled")
           2. Artist (omitted if unknown)
-          3. Year  |  Medium  (omitted if both are unknown)
+          3. Year  |  Medium  (omitted if both unknown; medium truncated at 80 chars)
           4. Source name (optional, controlled by show_source)
+          5. Fact text (optional, controlled by show_facts; wrapped by compositor)
         """
-        lines = [self.title or "Untitled"]
+        data: list[tuple[str, str]] = [(self.title or "Untitled", "title")]
         if self.artist:
-            lines.append(self.artist)
-        detail = "  |  ".join(p for p in (self.year, self.medium) if p)
+            data.append((self.artist, "artist"))
+        medium_short = (self.medium[:80] + "…") if len(self.medium) > 80 else self.medium
+        detail = "  |  ".join(p for p in (self.year, medium_short) if p)
         if detail:
-            lines.append(detail)
+            data.append((detail, "detail"))
         if show_source and self.source_name:
-            lines.append(self.source_name)
-        return lines
+            data.append((self.source_name, "source"))
+        if show_facts and self.fact:
+            data.append((self.fact, "fact"))
+        return data
 
 
 @dataclass
@@ -338,7 +356,34 @@ class MetSource:
             image_url   = image_url,
             source_name = self.NAME,
             artwork_url = obj.get("objectURL", ""),
+            fact        = self._build_fact(obj),
         )
+
+    @staticmethod
+    def _build_fact(obj: dict) -> str:
+        """
+        Synthesise a brief fact from Met API fields that are present in every
+        object response without extra API calls.
+
+        Combines period/dynasty information with thematic tag terms.
+        Examples: "Renaissance period. Themes: Portrait, Landscape, Garden."
+                  "Qing dynasty. Themes: Birds, Flowers."
+        """
+        parts = []
+        period  = obj.get("period", "").strip()
+        dynasty = obj.get("dynasty", "").strip()
+        if period:
+            parts.append(f"{period} period.")
+        elif dynasty:
+            parts.append(f"{dynasty} dynasty.")
+        tags = [
+            t.get("term", "").strip()
+            for t in (obj.get("tags") or [])
+            if t.get("term")
+        ]
+        if tags:
+            parts.append(f"Themes: {', '.join(tags[:4])}.")
+        return " ".join(parts)
 
 
 # ── Source: Art Institute of Chicago ─────────────────────────────────────────
@@ -357,7 +402,7 @@ AIC_CLASSIFICATION_MAP = {
 AIC_FIELDS = (
     "id,title,artist_display,date_display,date_start,date_end,"
     "medium_display,image_id,place_of_origin,classification_title,"
-    "is_public_domain"
+    "description,is_public_domain"
 )
 
 
@@ -456,7 +501,27 @@ class AICSource:
             image_url   = image_url,
             source_name = self.NAME,
             artwork_url = artwork_url,
+            fact        = self._extract_description(item.get("description", "") or ""),
         )
+
+    @staticmethod
+    def _extract_description(raw: str) -> str:
+        """
+        Extract a clean first sentence from AIC's description field.
+
+        AIC descriptions are HTML strings. This strips tags and returns the
+        first sentence (up to 200 characters), trimmed of whitespace.
+        """
+        if not raw:
+            return ""
+        # Strip HTML tags
+        text = re.sub(r"<[^>]+>", " ", raw)
+        text = re.sub(r"\s+", " ", text).strip()
+        # Take first sentence
+        sentences = re.split(r"(?<=[.!?])\s+", text)
+        first = sentences[0].strip() if sentences else ""
+        # Hard cap at 200 characters to keep the overlay readable
+        return first[:200] + ("…" if len(first) > 200 else "")
 
 
 # ── Source: Rijksmuseum Amsterdam ─────────────────────────────────────────────
@@ -573,7 +638,30 @@ class RijksmuseumSource:
             image_url   = image_url,
             source_name = self.NAME,
             artwork_url = (item.get("links") or {}).get("web", ""),
+            fact        = self._extract_long_title_fact(long_title, year),
         )
+
+    @staticmethod
+    def _extract_long_title_fact(long_title: str, year: str) -> str:
+        """
+        Derive a brief context sentence from the Rijksmuseum longTitle field.
+
+        The longTitle typically reads like:
+          "Girl with a Pearl Earring, Johannes Vermeer, c. 1665"
+        or
+          "The Night Watch, Rembrandt van Rijn, 1642, oil on canvas, 379.5 x 453.5cm"
+
+        When richer plaque description text is needed, a future enhancement
+        should call the Rijksmuseum object detail endpoint
+        (GET /api/en/collection/{objectNumber}) and read
+        artObject.plaqueDescriptionEnglish.
+        """
+        if not long_title:
+            return ""
+        # Strip the year we already extracted to avoid redundancy,
+        # then trim to a readable length.
+        fact = long_title.replace(f", {year}", "").strip().rstrip(",")
+        return fact[:200] + ("…" if len(fact) > 200 else "")
 
 
 # ── Image download ────────────────────────────────────────────────────────────
@@ -618,28 +706,146 @@ OVERLAY_POSITIONS = {
 }
 
 
-def find_system_font(size: int):
+def load_font_set(base_size: int) -> dict:
     """
-    Attempt to load a readable Bold sans-serif font from common Linux paths.
-    Falls back to Pillow's built-in bitmap default if none are found.
-    The built-in font ignores the size argument and renders small but is
-    always available.
+    Load a set of font variants for the overlay card roles.
+
+    Returns a dict keyed by role name:
+      title   -- Bold, base_size
+      artist  -- Regular, 82% of base_size
+      detail  -- Regular, 68% of base_size
+      source  -- Regular, 68% of base_size
+      fact    -- Oblique/Italic, 68% of base_size
+
+    Falls back to Pillow's built-in bitmap font if no system fonts are found.
     """
     from PIL import ImageFont
-    candidates = [
+
+    BOLD_PATHS = [
         "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
         "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
         "/usr/share/fonts/truetype/ubuntu/Ubuntu-B.ttf",
         "/usr/share/fonts/truetype/noto/NotoSans-Bold.ttf",
-        "/usr/share/fonts/truetype/freefont/FreeSansBold.ttf",
     ]
-    for path in candidates:
-        if os.path.exists(path):
-            try:
-                return ImageFont.truetype(path, size)
-            except Exception:
-                continue
-    return ImageFont.load_default()
+    REGULAR_PATHS = [
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+        "/usr/share/fonts/truetype/ubuntu/Ubuntu-R.ttf",
+        "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
+    ]
+    OBLIQUE_PATHS = [
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Oblique.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Italic.ttf",
+        "/usr/share/fonts/truetype/ubuntu/Ubuntu-RI.ttf",
+        "/usr/share/fonts/truetype/noto/NotoSans-Italic.ttf",
+    ]
+
+    def load_first(paths, size):
+        for p in paths:
+            if os.path.exists(p):
+                try:
+                    return ImageFont.truetype(p, size)
+                except Exception:
+                    continue
+        return ImageFont.load_default()
+
+    title_size  = base_size
+    artist_size = max(int(base_size * 0.82), 12)
+    detail_size = max(int(base_size * 0.68), 11)
+
+    return {
+        "title":  load_first(BOLD_PATHS,    title_size),
+        "artist": load_first(REGULAR_PATHS, artist_size),
+        "detail": load_first(REGULAR_PATHS, detail_size),
+        "source": load_first(REGULAR_PATHS, detail_size),
+        "fact":   load_first(OBLIQUE_PATHS, detail_size),
+    }
+
+
+def _wrap_to_pixel_width(
+    text: str, font, max_px: int, draw
+) -> list[str]:
+    """
+    Wrap text to fit within max_px pixels using actual font metrics.
+
+    Estimates average character width from the full string, then uses
+    textwrap with an adjusted character limit. Applies a 0.92 safety
+    margin to account for variable-width character distributions.
+    """
+    if not text:
+        return [""]
+    bbox = draw.textbbox((0, 0), text, font=font)
+    text_px = max(bbox[2] - bbox[0], 1)
+    if text_px <= max_px:
+        return [text]
+    avg_char_w = text_px / max(len(text), 1)
+    max_chars  = max(15, int(max_px / avg_char_w * 0.92))
+    return textwrap.wrap(text, width=max_chars) or [text]
+
+
+def get_screen_resolution() -> Optional[tuple]:
+    """
+    Detect the current display resolution by querying xrandr or xdpyinfo.
+
+    Returns (width, height) as a tuple of ints, or None if detection fails
+    (e.g. on Wayland without XWayland, or in a headless/systemd environment).
+    """
+    # xrandr reports: 'Screen 0: ... current 1366 x 768, ...'
+    try:
+        r = subprocess.run(
+            ["xrandr", "--current"], capture_output=True, text=True, timeout=5
+        )
+        for line in r.stdout.splitlines():
+            m = re.search(r"current (\d+) x (\d+)", line)
+            if m:
+                return int(m.group(1)), int(m.group(2))
+    except Exception:
+        pass
+
+    # xdpyinfo reports: '  dimensions:    1366x768 pixels'
+    try:
+        r = subprocess.run(
+            ["xdpyinfo"], capture_output=True, text=True, timeout=5
+        )
+        for line in r.stdout.splitlines():
+            m = re.search(r"dimensions:\s+(\d+)x(\d+)", line)
+            if m:
+                return int(m.group(1)), int(m.group(2))
+    except Exception:
+        pass
+
+    return None
+
+
+def calculate_display_scale(
+    img_w: int, img_h: int,
+    screen_w: int, screen_h: int,
+    scaling_mode: str = "scaled",
+) -> float:
+    """
+    Calculate the scale factor at which the desktop environment will render
+    the image on the physical screen.
+
+    Used to convert a desired on-screen font size to the correct in-image
+    pixel size, so text appears at a consistent apparent size regardless of
+    the image's native resolution.
+
+    scaling_mode values match the gsettings picture-options values:
+      scaled    -- fit whole image, maintain aspect ratio (most common for art)
+      zoom      -- crop to fill, maintain aspect ratio
+      centered  -- native pixel size, no scaling
+      stretched -- fill screen, ignoring aspect ratio
+      wallpaper -- tile at native size
+    """
+    if scaling_mode == "scaled":
+        return min(screen_w / img_w, screen_h / img_h)
+    elif scaling_mode == "zoom":
+        return max(screen_w / img_w, screen_h / img_h)
+    elif scaling_mode in ("centered", "wallpaper"):
+        return 1.0
+    else:
+        # stretched: use average of x and y scale as approximation
+        return (screen_w / img_w + screen_h / img_h) / 2.0
 
 
 def composite_overlay(
@@ -652,6 +858,8 @@ def composite_overlay(
     padding:     int,
     text_color:  tuple,
     show_source: bool,
+    show_facts:  bool = False,
+    scaling:     str  = "scaled",
     verbose:     bool = False,
 ) -> bool:
     """
@@ -659,8 +867,13 @@ def composite_overlay(
     containing the artwork's label lines, and save the result as a JPEG at
     output_path.
 
-    The card dimensions adapt to the text content. Line 0 (title) uses
-    font_size; subsequent lines use 80% of font_size.
+    font_size is the desired apparent size on the user's screen in points.
+    composite_overlay uses get_screen_resolution() to detect the display and
+    calculate_display_scale() to determine how much the desktop environment
+    will scale the image, then composites the font at the correct in-image
+    size so text appears at font_size on screen regardless of the painting's
+    native resolution. Falls back to a short-dimension heuristic if screen
+    resolution cannot be detected.
 
     Returns True on success, False if the image cannot be opened or saved.
     """
@@ -672,25 +885,59 @@ def composite_overlay(
         err(f"Cannot open image for compositing: {exc}")
         return False
 
-    lines = artwork.label_lines(show_source=show_source)
-    if not lines:
+    label_pairs = artwork.label_data(show_source=show_source, show_facts=show_facts)
+    if not label_pairs:
         shutil.copy(image_path, output_path)
         return True
 
-    detail_size = max(int(font_size * 0.8), 12)
-    font_title  = find_system_font(font_size)
-    font_detail = find_system_font(detail_size)
-    fonts = [font_title] + [font_detail] * (len(lines) - 1)
+    img_w, img_h = img.size
+    # Card content must not exceed 44% of image width so it never overflows.
+    max_card_content_w = min(int(img_w * 0.44), 900) - padding * 2
 
-    # Measure each line with a throw-away draw context
-    dummy_draw = ImageDraw.Draw(img)
-    bboxes = [dummy_draw.textbbox((0, 0), line, font=f) for line, f in zip(lines, fonts)]
+    # Compute in-image font size from desired on-screen size.
+    # font_size = apparent size wanted on screen. We divide by the display
+    # scale factor so the compositor writes pixels that appear at font_size
+    # after Cinnamon/GNOME scales the image to fill the screen.
+    screen_res = get_screen_resolution()
+    if screen_res:
+        screen_w, screen_h = screen_res
+        display_scale = calculate_display_scale(
+            img_w, img_h, screen_w, screen_h, scaling
+        )
+        font_size_in_image = max(12, int(font_size / display_scale))
+        dbg(
+            f"Screen {screen_w}x{screen_h}, image {img_w}x{img_h}, "
+            f"scale {display_scale:.3f}x -- "
+            f"{font_size}pt on screen = {font_size_in_image}pt in image",
+            verbose,
+        )
+    else:
+        # No screen detected (Wayland / headless / systemd timer context).
+        # Fall back to 12% of short dimension as a reasonable heuristic.
+        font_size_in_image = max(font_size, int(min(img_w, img_h) * 0.12))
+        dbg(f"Screen resolution unavailable -- using {font_size_in_image}pt in image",
+            verbose)
+
+    font_set    = load_font_set(font_size_in_image)
+    dummy_draw  = ImageDraw.Draw(img)
+
+    # Expand label_pairs into (text, role, font) triples, wrapping long lines
+    # to fit within the card budget using pixel-accurate font metrics.
+    triples: list[tuple[str, str]] = []  # (text, font)
+    for text, role in label_pairs:
+        font = font_set.get(role, font_set["detail"])
+        wrapped = _wrap_to_pixel_width(text, font, max_card_content_w, dummy_draw)
+        for line in wrapped:
+            triples.append((line, font))
+
+    # Measure the final line set
+    bboxes      = [dummy_draw.textbbox((0, 0), t, font=f) for t, f in triples]
     line_heights = [b[3] - b[1] for b in bboxes]
     line_widths  = [b[2] - b[0] for b in bboxes]
-    line_spacing = int(max(line_heights) * 0.35)
+    line_spacing = int(max(line_heights, default=font_size) * 0.35)
 
-    text_w = max(line_widths)
-    text_h = sum(line_heights) + line_spacing * (len(lines) - 1)
+    text_w = max(line_widths, default=0)
+    text_h = sum(line_heights) + line_spacing * (len(triples) - 1)
     card_w = text_w + padding * 2
     card_h = text_h + padding * 2
 
@@ -728,7 +975,7 @@ def composite_overlay(
 
     # Draw text lines inside the card
     y = card_y + padding
-    for line, font, lh in zip(lines, fonts, line_heights):
+    for (line, font), lh in zip(triples, line_heights):
         draw.text((card_x + padding, y), line, font=font, fill=(*text_color, 255))
         y += lh + line_spacing
 
@@ -879,7 +1126,368 @@ def show_info(cache_dir: Path):
     print(f"  {'Source:':<10} {meta.get('source_name', 'Unknown')}")
     print(f"  {'URL:':<10} {meta.get('artwork_url', 'Unknown')}")
     print(f"  {'Fetched:':<10} {fetched_str}")
+    if meta.get("fact"):
+        print(f"  {'Fact:':<10} {meta['fact']}")
     print()
+
+
+# ── Interactive configuration editor ────────────────────────────────────────
+#
+# Valid option lists for settings that have a fixed set of choices.
+# TODO (v2 GUI): each of these becomes a dropdown or checkbox group
+# in the future graphical settings interface.
+
+VALID_CATEGORIES = ["paintings", "drawings", "prints", "sculpture", "photographs", "textiles"]
+
+VALID_REGIONS = [
+    "Dutch", "Flemish", "Italian", "French", "Spanish", "German",
+    "Japanese", "Chinese", "British", "American", "Venetian", "Roman",
+    "Persian", "Mughal", "Ottoman", "Byzantine",
+]
+
+VALID_THEMES = [
+    "portrait", "landscape", "still life", "mythology", "religious",
+    "biblical", "allegory", "genre", "history", "battle", "marine",
+    "cityscape", "flower", "nude",
+]
+
+VALID_MEDIA = [
+    "oil on canvas", "oil on panel", "watercolor", "tempera", "fresco",
+    "engraving", "etching", "lithograph", "gouache", "pastel",
+]
+
+VALID_POSITIONS = [
+    "bottom-left", "bottom-center", "bottom-right",
+    "top-left", "top-center", "top-right",
+]
+
+# TODO (v2 GUI): scaling becomes a dropdown
+VALID_SCALING = ["scaled", "zoom", "stretched", "centered", "wallpaper"]
+
+
+def _cfg_get(cfg: configparser.ConfigParser, section: str, key: str, fallback: str = "") -> str:
+    try:
+        return cfg.get(section, key)
+    except (configparser.NoSectionError, configparser.NoOptionError):
+        return fallback
+
+
+def _cfg_set(cfg: configparser.ConfigParser, section: str, key: str, value: str):
+    if not cfg.has_section(section):
+        cfg.add_section(section)
+    cfg.set(section, key, str(value))
+
+
+def _save_config(cfg: configparser.ConfigParser, path: Path):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w") as fh:
+        cfg.write(fh)
+
+
+def configure(config_path: Path):
+    """
+    Interactive configuration editor launched by --configure.
+
+    Displays all current settings grouped by section. The user selects a
+    setting to edit and is shown the appropriate input type:
+      - bool settings     -> yes/no confirm
+      - fixed-choice      -> arrow-key select or checkbox
+      - free-text lists   -> checkbox from known values
+      - numbers           -> text input with validation
+
+    Changes are written to config_path immediately after each edit.
+    """
+    try:
+        import questionary
+    except ImportError:
+        err("questionary is required for --configure")
+        print(f"  Install: {clr(YELLOW, 'pip install questionary --break-system-packages')}")
+        sys.exit(1)
+
+    cfg = configparser.ConfigParser()
+    if config_path.exists():
+        cfg.read(config_path)
+    else:
+        warn(f"No config found at {config_path} -- starting with defaults")
+
+    def get(section, key, fallback=""):
+        return _cfg_get(cfg, section, key, fallback)
+
+    def save(section, key, value, label):
+        _cfg_set(cfg, section, key, value)
+        _save_config(cfg, config_path)
+        ok(f"Saved: {label} = {value}")
+
+    def bool_label(section, key, fallback="true"):
+        return "enabled" if get(section, key, fallback) == "true" else "disabled"
+
+    print()
+    print(f"  {clr(CYAN, 'artwall')} configuration")
+    print(f"  {config_path}")
+    print(f"  {clr(CYAN, 'tip:')} arrow keys to navigate, enter to select")
+    print(f"        in sub-menus: ctrl-c or leave blank to go back without changing")
+    print()
+
+    last_name = None  # cursor memory: name of the last edited setting
+    while True:
+        # Rebuild default choice to restore cursor to last edited setting.
+        # Splits on 2+ spaces to separate setting name from its value column.
+        default_choice = None
+        if last_name:
+            for c in choices if 'choices' in dir() else []:
+                if isinstance(c, str):
+                    parts = re.split(r'\s{2,}', c.strip())
+                    if parts and parts[0] == last_name:
+                        default_choice = c
+                        break
+        rk_key_status = (
+            "set"
+            if get("sources", "rijksmuseum_api_key", "YOUR_KEY_HERE") not in ("", "YOUR_KEY_HERE")
+            else "not set"
+        )
+        choices = [
+            questionary.Separator("  General"),
+            f"  Rotation interval          {get('general', 'interval_hours', '24')}h",
+            f"  Cache max images           {get('general', 'cache_max', '100')}",
+            questionary.Separator("  Sources"),
+            f"  Met Museum                 {bool_label('sources', 'met_museum', 'true')}",
+            f"  Art Institute of Chicago   {bool_label('sources', 'art_institute_chicago', 'true')}",
+            f"  Rijksmuseum                {bool_label('sources', 'rijksmuseum', 'false')}",
+            f"  Rijksmuseum API key        {rk_key_status}",
+            f"  Source weights (Met/AIC/RK) {get('sources','met_weight','1')}/{get('sources','aic_weight','1')}/{get('sources','rijksmuseum_weight','1')}",
+            questionary.Separator("  Filters"),
+            f"  Categories                 {get('filters', 'categories', 'paintings') or '(all)'}",
+            f"  Regions                    {get('filters', 'regions', '') or '(all)'}",
+            f"  Themes                     {get('filters', 'themes', '') or '(all)'}",
+            f"  Media                      {get('filters', 'media', '') or '(all)'}",
+            f"  Date range                 {get('filters', 'date_min', '1400')} to {get('filters', 'date_max', '1900')}",
+            questionary.Separator("  Overlay"),
+            f"  Overlay enabled            {bool_label('overlay', 'enabled', 'true')}",
+            f"  Position                   {get('overlay', 'position', 'bottom-left')}",
+            f"  Font size                  {get('overlay', 'font_size', '28')}pt",
+            f"  Background opacity         {get('overlay', 'background_opacity', '0.65')}",
+            f"  Scaling                    {get('overlay', 'scaling', 'scaled')}",
+            f"  Show museum name           {bool_label('overlay', 'show_source', 'true')}",
+            f"  Show artwork facts          {bool_label('overlay', 'show_facts', 'false')}",
+            questionary.Separator(""),
+            "  Done",
+        ]
+
+        # Restore cursor to last edited setting
+        default_choice = None
+        if last_name:
+            for c in choices:
+                if isinstance(c, str):
+                    parts = re.split(r'\s{2,}', c.strip())
+                    if parts and parts[0] == last_name:
+                        default_choice = c
+                        break
+
+        action = questionary.select(
+            "Select a setting to edit  (enter=confirm, ctrl-c=quit):",
+            choices=choices,
+            default=default_choice,
+        ).ask()
+
+        if action is None or action.strip() == "Done":
+            print()
+            ok(f"Configuration saved to {config_path}")
+            break
+
+        a = action.strip()
+        # Store setting name (text before the value column) for cursor memory
+        name_parts = re.split(r'\s{2,}', a)
+        last_name = name_parts[0] if name_parts else None
+        print()
+
+        if a.startswith("Rotation interval"):
+            v = questionary.text(
+                "Rotation interval in hours:",
+                default=get("general", "interval_hours", "24"),
+                validate=lambda v: v.isdigit() or "Must be a whole number",
+            ).ask()
+            if v:
+                save("general", "interval_hours", v, "interval_hours")
+                warn("Re-run install.sh to update the systemd timer with the new interval.")
+
+        elif a.startswith("Cache max"):
+            v = questionary.text(
+                "Maximum cached images:",
+                default=get("general", "cache_max", "100"),
+                validate=lambda v: v.isdigit() or "Must be a whole number",
+            ).ask()
+            if v:
+                save("general", "cache_max", v, "cache_max")
+
+        elif a.startswith("Met Museum"):
+            v = questionary.confirm(
+                "Enable Met Museum?",
+                default=get("sources", "met_museum", "true") == "true",
+            ).ask()
+            if v is not None:
+                save("sources", "met_museum", str(v).lower(), "met_museum")
+
+        elif a.startswith("Art Institute"):
+            v = questionary.confirm(
+                "Enable Art Institute of Chicago?",
+                default=get("sources", "art_institute_chicago", "true") == "true",
+            ).ask()
+            if v is not None:
+                save("sources", "art_institute_chicago", str(v).lower(), "art_institute_chicago")
+
+        elif a.startswith("Rijksmuseum ") and "key" not in a.lower():
+            v = questionary.confirm(
+                "Enable Rijksmuseum?",
+                default=get("sources", "rijksmuseum", "false") == "true",
+            ).ask()
+            if v is not None:
+                save("sources", "rijksmuseum", str(v).lower(), "rijksmuseum")
+
+        elif "API key" in a:
+            current = get("sources", "rijksmuseum_api_key", "")
+            if current == "YOUR_KEY_HERE":
+                current = ""
+            v = questionary.text(
+                "Rijksmuseum API key:\n"
+                "  Register free at https://www.rijksmuseum.nl/en/research/conduct-research/"
+                "data/access-to-and-use-of-the-rijksmuseum-api\n"
+                "  (leave blank to keep current):",
+                default=current,
+            ).ask()
+            if v and v.strip():
+                save("sources", "rijksmuseum_api_key", v.strip(), "rijksmuseum_api_key")
+
+        elif a.startswith("Source weights"):
+            for label, key in [("Met weight", "met_weight"), ("AIC weight", "aic_weight"), ("Rijksmuseum weight", "rijksmuseum_weight")]:
+                v = questionary.text(
+                    f"{label} (higher = more likely to be chosen):",
+                    default=get("sources", key, "1"),
+                    validate=lambda v: v.isdigit() or "Must be a whole number",
+                ).ask()
+                if v:
+                    save("sources", key, v, key)
+
+        elif a.startswith("Categories"):
+            current = [c.strip() for c in get("filters", "categories", "").split(",") if c.strip()]
+            selected = questionary.checkbox(
+                "Categories (space=toggle, enter=confirm):",
+                choices=[questionary.Choice(c, checked=(c in current)) for c in VALID_CATEGORIES],
+            ).ask()
+            if selected is not None:
+                save("filters", "categories", ", ".join(selected), "categories")
+
+        elif a.startswith("Regions"):
+            current_lower = [r.strip().lower() for r in get("filters", "regions", "").split(",") if r.strip()]
+            selected = questionary.checkbox(
+                "Regions (space=toggle, enter=confirm):",
+                choices=[questionary.Choice(r, checked=(r.lower() in current_lower)) for r in VALID_REGIONS],
+            ).ask()
+            if selected is not None:
+                save("filters", "regions", ", ".join(selected), "regions")
+
+        elif a.startswith("Themes"):
+            current = [t.strip() for t in get("filters", "themes", "").split(",") if t.strip()]
+            selected = questionary.checkbox(
+                "Themes (space=toggle, enter=confirm):",
+                choices=[questionary.Choice(t, checked=(t in current)) for t in VALID_THEMES],
+            ).ask()
+            if selected is not None:
+                save("filters", "themes", ", ".join(selected), "themes")
+
+        elif a.startswith("Media"):
+            current = [m.strip() for m in get("filters", "media", "").split(",") if m.strip()]
+            selected = questionary.checkbox(
+                "Media (space=toggle, enter=confirm):",
+                choices=[questionary.Choice(m, checked=(m in current)) for m in VALID_MEDIA],
+            ).ask()
+            if selected is not None:
+                save("filters", "media", ", ".join(selected), "media")
+
+        elif a.startswith("Date range"):
+            for label, key, default in [
+                ("Earliest year (negative for BCE, e.g. -500):", "date_min", "1400"),
+                ("Latest year:", "date_max", "1900"),
+            ]:
+                v = questionary.text(
+                    label,
+                    default=get("filters", key, default),
+                    validate=lambda v: v.lstrip("-").isdigit() or "Must be a year, e.g. 1400 or -500",
+                ).ask()
+                if v:
+                    save("filters", key, v, key)
+
+        elif a.startswith("Overlay enabled"):
+            v = questionary.confirm(
+                "Show metadata overlay on wallpaper?",
+                default=get("overlay", "enabled", "true") == "true",
+            ).ask()
+            if v is not None:
+                save("overlay", "enabled", str(v).lower(), "enabled")
+
+        elif a.startswith("Position"):
+            v = questionary.select(
+                "Overlay card position:",
+                choices=VALID_POSITIONS + ["-- Back (no change) --"],
+                default=get("overlay", "position", "bottom-left"),
+            ).ask()
+            if v and v != "-- Back (no change) --":
+                save("overlay", "position", v, "position")
+
+        elif a.startswith("Font size"):
+            v = questionary.text(
+                "Font size in points  (leave blank to go back):",
+                default=get("overlay", "font_size", "28"),
+                validate=lambda v: v.isdigit() or "Must be a whole number",
+            ).ask()
+            if v:
+                save("overlay", "font_size", v, "font_size")
+
+        elif a.startswith("Background opacity"):
+            v = questionary.text(
+                "Background opacity 0.0-1.0  (leave blank to go back):",
+                default=get("overlay", "background_opacity", "0.65"),
+                validate=lambda v: (
+                    v.replace(".", "", 1).isdigit() and 0.0 <= float(v) <= 1.0
+                ) or "Must be a number between 0.0 and 1.0",
+            ).ask()
+            if v:
+                save("overlay", "background_opacity", v, "background_opacity")
+
+        elif a.startswith("Scaling"):
+            # TODO (v2 GUI): becomes a dropdown in the settings interface
+            v = questionary.select(
+                "Wallpaper scaling mode:",
+                choices=[
+                    questionary.Choice("scaled     fit whole image, letterboxed (recommended for art)", value="scaled"),
+                    questionary.Choice("zoom       crop to fill screen (may cut off overlay card)",    value="zoom"),
+                    questionary.Choice("stretched  distort to fill screen",                           value="stretched"),
+                    questionary.Choice("centered   center at native size, no scaling",                value="centered"),
+                    questionary.Choice("wallpaper  tile the image",                                   value="wallpaper"),
+                    questionary.Choice("-- Back (no change) --",                                      value="__back__"),
+                ],
+                default=get("overlay", "scaling", "scaled"),
+            ).ask()
+            if v and v != "__back__":
+                save("overlay", "scaling", v, "scaling")
+
+        elif a.startswith("Show museum name"):
+            v = questionary.confirm(
+                "Show museum name in the overlay card?",
+                default=get("overlay", "show_source", "true") == "true",
+            ).ask()
+            if v is not None:
+                save("overlay", "show_source", str(v).lower(), "show_source")
+
+        elif a.startswith("Show artwork facts"):
+            v = questionary.confirm(
+                "Show a brief fact about the artwork or artist in the overlay?\n"
+                "  (Met: period + themes, AIC: description, Rijksmuseum: title context)",
+                default=get("overlay", "show_facts", "false") == "true",
+            ).ask()
+            if v is not None:
+                save("overlay", "show_facts", str(v).lower(), "show_facts")
+
+        print()
 
 
 # ── Source registry ───────────────────────────────────────────────────────────
@@ -987,6 +1595,10 @@ def main():
     parser.add_argument(
         "--version", action="version", version=f"artwall {VERSION}",
     )
+    parser.add_argument(
+        "--configure", action="store_true",
+        help="Launch the interactive configuration editor",
+    )
     args = parser.parse_args()
 
     print()
@@ -995,6 +1607,12 @@ def main():
 
     # ── Preflight: verify dependencies before any work (Rule 15)
     preflight()
+
+    # ── Early exit: interactive configuration editor
+    if args.configure:
+        config_path = Path(args.config).expanduser().resolve()
+        configure(config_path)
+        return
 
     # ── Step 1: load configuration
     step(1, TOTAL_STEPS, "Loading configuration")
@@ -1071,11 +1689,13 @@ def main():
 
     overlay_enabled = cfg.getboolean("overlay", "enabled",            fallback=True)
     position        = cfg.get      ("overlay", "position",            fallback="bottom-left")
-    font_size       = cfg.getint   ("overlay", "font_size",           fallback=28)
+    font_size       = cfg.getint   ("overlay", "font_size",           fallback=40)
     bg_opacity      = cfg.getfloat ("overlay", "background_opacity",  fallback=0.65)
     padding         = cfg.getint   ("overlay", "padding",             fallback=20)
-    show_source     = cfg.getboolean("overlay", "show_source",        fallback=True)
-    text_color_raw  = cfg.get      ("overlay", "text_color",          fallback="255, 255, 255")
+    show_source     = cfg.getboolean("overlay", "show_source",  fallback=True)
+    show_facts      = cfg.getboolean("overlay", "show_facts",   fallback=False)
+    scaling         = cfg.get      ("overlay", "scaling",       fallback="scaled")
+    text_color_raw  = cfg.get      ("overlay", "text_color",   fallback="255, 255, 255")
     text_color      = tuple(int(x.strip()) for x in text_color_raw.split(","))
 
     if overlay_enabled:
@@ -1089,6 +1709,8 @@ def main():
             padding     = padding,
             text_color  = text_color,
             show_source = show_source,
+            show_facts  = show_facts,
+            scaling     = scaling,
             verbose     = args.verbose,
         )
         if not success:
@@ -1109,6 +1731,7 @@ def main():
             "source_name": artwork.source_name,
             "artwork_url": artwork.artwork_url,
             "image_url":   artwork.image_url,
+            "fact":        artwork.fact,
             "timestamp":   timestamp,
         }, fh, indent=2)
 
@@ -1121,7 +1744,6 @@ def main():
         warn("Dry-run mode: wallpaper not set")
         print(f"        Image is at: {output_path}")
     else:
-        scaling = cfg.get("overlay", "scaling", fallback="scaled")
         if set_wallpaper(output_path, scaling=scaling, verbose=args.verbose):
             ok("Wallpaper set")
         else:
